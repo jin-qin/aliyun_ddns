@@ -9,14 +9,12 @@ from datetime import datetime
 import urllib
 import hashlib
 import hmac
-
-from bs4 import BeautifulSoup as BS
-
+import base64
 
 REQUEST_URL = 'https://alidns.aliyuncs.com/'
 LOCAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ip.txt')
 ALIYUN_SETTINGS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'aliyun_settings.json')
-
+DOMAIN_TYPE = 'AAAA'
 
 def get_common_params(settings):
 	"""
@@ -43,11 +41,12 @@ def get_signed_params(http_method, params, settings):
 	#2、按照参数的字典顺序排序
 	sorted_params = sorted(params.items())
 	#3、encode 参数
-	query_params = urllib.urlencode(sorted_params)
+	query_params = urllib.parse.urlencode(sorted_params)
 	#4、构造需要签名的字符串
-	str_to_sign = http_method + "&" + urllib.quote_plus("/") + "&" + urllib.quote_plus(query_params)
+	str_to_sign = http_method + "&" + urllib.parse.quote_plus("/") + "&" + urllib.parse.quote_plus(query_params)
 	#5、计算签名
-	signature = hmac.new(str(settings['access_secret'] + '&'), str(str_to_sign), hashlib.sha1).digest().encode('base64').strip('\n') #此处注意，必须用str转换，因为hmac不接受unicode，大坑！！！
+	signature = hmac.new((settings['access_secret'] + '&').encode('utf-8'), str_to_sign.encode('utf-8'), hashlib.sha1).digest()
+	signature = base64.b64encode(signature)
 	#6、将签名加入参数中
 	params['Signature'] = signature
 
@@ -64,18 +63,25 @@ def update_yun(ip):
 		settings = json.loads(f.read())
 
 	#首先获取解析列表
+	domain = settings['domain']
+	root_domain = domain[domain.find('.') + 1 :]
+	sub_domain = domain[: domain.find('.')]
+	print('root domain is ' + root_domain + ', sub domain is ' + sub_domain)
+
 	get_params = get_signed_params('GET', {
 		'Action': 'DescribeDomainRecords',
-		'DomainName': settings['domain'],
-		'TypeKeyWord': 'A'
+		'DomainName': root_domain,
+		'TypeKeyWord': DOMAIN_TYPE
 	}, settings)
 
 	get_resp = requests.get(REQUEST_URL, get_params)
 
 	records = get_resp.json()
-	print 'get_records============'
-	print records
+	print('============ get_records ============')
+	print(records)
 	for record in records['DomainRecords']['Record']:
+		if record['RR'] != sub_domain:
+			continue
 		post_params = get_signed_params('POST', {
 			'Action': 'UpdateDomainRecord',
 			'RecordId': record['RecordId'],
@@ -85,40 +91,36 @@ def update_yun(ip):
 		}, settings)
 		post_resp = requests.post(REQUEST_URL, post_params)
 		result = post_resp.json()
-		print 'update_record============'
-		print result
+		print('============ update_record ============')
+		print(result)
 
 def get_curr_ip():
-	headers = {
-		'content-type': 'text/html',
-		'User-Agent': 'Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:22.0) Gecko/20100101 Firefox/22.0'
-	}
-	resp = requests.get('https://www.ip.cn/', headers=headers)
-	soup = BS(resp.content, 'html.parser')
-	for t in soup.find_all('code'):
-		if re.search(r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$", t.string):
-			return t.string
-	return ''
+	rsp = requests.get('https://api6.my-ip.io/ip')
+	return rsp.text
 
 def get_lastest_local_ip():
 	"""
 	获取最近一次保存在本地的ip
 	"""
-	print 'ip local path', LOCAL_FILE
-	with open(LOCAL_FILE, 'w+') as f:
+	print('ip local path', LOCAL_FILE)
+
+	fmod = 'r'
+	if not os.path.exists(LOCAL_FILE):
+		fmod='w+'
+	with open(LOCAL_FILE, fmod) as f:
 		last_ip = f.readline()
 	return last_ip
 
 if __name__ == '__main__':
 	ip = get_curr_ip()
 	if not ip:
-		print 'get ip failed'
+		print('get ip failed')
 	else:
 		last_ip = get_lastest_local_ip()
-		print ip, last_ip
+		print(ip, last_ip)
 		if ip != last_ip:
-			print 'save ip to {}...'.format(LOCAL_FILE)
-			with open(LOCAL_FILE, 'wb') as f:
+			print('save ip to {}...'.format(LOCAL_FILE))
+			with open(LOCAL_FILE, 'w') as f:
 				f.write(ip)
-			print 'update remote record...'
+			print('update remote record...')
 			update_yun(ip)
